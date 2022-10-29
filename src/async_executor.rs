@@ -122,11 +122,9 @@ pub fn run<F: Future>(mut future: F) -> F::Output {
 
     let mut future = unsafe { Pin::new_unchecked(&mut future) };
     loop {
-        let task = match RUNTIME.lock().pop_front() {
-            Some(t) => t,
-            _ => continue,
+        if let Some(task) = RUNTIME.lock().pop_front() {
+            task.run();
         };
-        task.run();
         match Future::poll(future.as_mut(), &mut cx) {
             Poll::Ready(val) => break val,
             Poll::Pending => {}
