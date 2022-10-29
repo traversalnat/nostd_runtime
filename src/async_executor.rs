@@ -4,9 +4,8 @@ use alloc::collections::LinkedList;
 use alloc::sync::Arc;
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use core::task::{Context, Poll};
 
-use alloc::boxed::Box;
 use spin::{Lazy, Mutex};
 
 pub use futures::join;
@@ -42,21 +41,13 @@ impl Runtime {
         self.task_queue.lock().pop_front()
     }
 
-    pub fn pop_back(&self) -> Option<Task> {
-        self.task_queue.lock().pop_back()
-    }
-
     pub fn push_back(&self, task: Task) {
         self.task_queue.lock().push_back(task);
-    }
-
-    pub fn push_front(&self, task: Task) {
-        self.task_queue.lock().push_front(task);
     }
 }
 
 static RUNTIME: Lazy<Mutex<Runtime>> = Lazy::new(|| {
-    let mut runtime = Runtime {
+    let runtime = Runtime {
         task_queue: Arc::new(Mutex::new(LinkedList::new())),
     };
 
@@ -122,12 +113,13 @@ pub fn run<F: Future>(mut future: F) -> F::Output {
 
     let mut future = unsafe { Pin::new_unchecked(&mut future) };
     loop {
-        if let Some(task) = RUNTIME.lock().pop_front() {
-            task.run();
-        };
         match Future::poll(future.as_mut(), &mut cx) {
             Poll::Ready(val) => break val,
             Poll::Pending => {}
         };
+
+        if let Some(task) = RUNTIME.lock().pop_front() {
+            task.run();
+        } 
     }
 }
