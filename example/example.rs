@@ -1,11 +1,8 @@
-mod async_executor;
-mod utils;
-
 // use std to show example
 pub use std::alloc;
 
-use async_executor::{spawn, run, block_on, join};
-use utils::async_yield;
+pub use async_executor::{spawn, run, block_on, join};
+pub use utils::async_yield;
 
 fn main() {
     let handle_1 = spawn(async {
