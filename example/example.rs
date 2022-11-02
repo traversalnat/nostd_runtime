@@ -1,26 +1,25 @@
-// use std to show example
+use async_channel::{bounded, Receiver};
 pub use std::alloc;
 
-pub use async_executor::{spawn, run, block_on, join};
-pub use utils::async_yield;
+pub use async_executor::Executor;
+
+async fn dispatch(reciever: Receiver<String>) {
+    while let Ok(string) = reciever.recv().await {
+        println!("dispatch {}", string);
+    }
+}
 
 fn main() {
-    let handle_1 = spawn(async {
-        loop {
-            println!("AAAAAA");
-            async_yield().await;
+    let ex = Executor::new();
+    ex.block_on(async {
+        let (sender, receiver) = bounded::<String>(3);
+        ex.spawn(dispatch(receiver));
+        for i in 0..3 {
+            let sender = sender.clone();
+            ex.spawn(async move {
+                sender.send(format!("begin {i}")).await.unwrap();
+                sender.send(format!("end {i}")).await.unwrap();
+            });
         }
-    });
-
-    let handle_2 = spawn(async {
-        loop {
-            println!("BBBBBB");
-            async_yield().await;
-        }
-    });
-
-    // use block_on instead if you run task with thread in RUNTIME
-    run(async {
-        join!(handle_1, handle_2);
     });
 }

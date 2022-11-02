@@ -6,17 +6,17 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use spin::{Lazy, Mutex};
+use spin::Mutex;
 
 pub use futures::join;
 
 /// A spawned future and its current state.
 type Task = async_task::Task<()>;
 
-pub struct JoinHandle<R>(async_task::JoinHandle<R, ()>);
+pub struct JoinHandle(async_task::JoinHandle<(), ()>);
 
-impl<R> Future for JoinHandle<R> {
-    type Output = R;
+impl Future for JoinHandle {
+    type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.0).poll(cx) {
@@ -30,96 +30,98 @@ impl<R> Future for JoinHandle<R> {
 }
 
 pub(crate) type Queue = Arc<Mutex<LinkedList<Task>>>;
+pub(crate) type JoinHandleQueue = Arc<Mutex<LinkedList<JoinHandle>>>;
 
 /// Runtime definition
 pub(crate) struct Runtime {
     pub(crate) task_queue: Queue,
+    pub(crate) handle_queue: JoinHandleQueue,
 }
 
 impl Runtime {
-    pub fn pop_front(&self) -> Option<Task> {
+    pub fn task_pop_front(&self) -> Option<Task> {
         self.task_queue.lock().pop_front()
     }
 
-    pub fn push_back(&self, task: Task) {
-        self.task_queue.lock().push_back(task);
+    pub fn handle_pop_front(&self) -> Option<JoinHandle> {
+        self.handle_queue.lock().pop_front()
+    }
+
+    pub fn handle_push_back(&self, handle: JoinHandle) {
+        self.handle_queue.lock().push_back(handle);
     }
 }
 
-static RUNTIME: Lazy<Mutex<Runtime>> = Lazy::new(|| {
-    let runtime = Runtime {
-        task_queue: Arc::new(Mutex::new(LinkedList::new())),
-    };
-
-    // if there is any thread implemention
-    // for _ in 0..CPU_NUMS {
-    //     thread::spawn(move || loop {
-    //         let task = match RUNTIME.lock().pop_front() {
-    //             Some(t) => t,
-    //             _ => continue,
-    //         };
-    //         task.run();
-    //     });
-    // }
-
-    Mutex::new(runtime)
-});
-
-
-/// Spawns a future on the executor.
-pub fn spawn<F, R>(future: F) -> JoinHandle<R>
-where
-    F: Future<Output = R> + Send + 'static,
-    R: Send + 'static,
-{
-    let (task, handle) = async_task::spawn(
-        future,
-        |t| {
-            RUNTIME.lock().push_back(t);
-        },
-        (),
-    );
-
-    task.schedule();
-
-    JoinHandle(handle)
+pub struct Executor {
+    runtime: Runtime,
 }
 
-// use when there is any parallel executor
-pub fn block_on<F: Future>(mut future: F) -> F::Output {
-    let waker = async_task::waker_fn(|| {});
+impl Executor {
+    pub fn new() -> Self {
+        let runtime = Runtime {
+            task_queue: Arc::new(Mutex::new(LinkedList::new())),
+            handle_queue: Arc::new(Mutex::new(LinkedList::new())),
+        };
+        Self { runtime }
+    }
 
-    let mut cx = Context::from_waker(&waker);
+    /// Spawns a future on the executor.
+    pub fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let queue = self.runtime.task_queue.clone();
+        let (task, handle) = async_task::spawn(
+            future,
+            move |t| {
+                queue.lock().push_back(t);
+            },
+            (),
+        );
 
-    let mut future = unsafe { Pin::new_unchecked(&mut future) };
-    loop {
-        match Future::poll(future.as_mut(), &mut cx) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {
-                // three choices:
-                // 1. thread park(unpark in waker), achieve thread first
-                // 2. just yield or sleep
-                // 3. do nothing
+        task.schedule();
+        self.runtime.handle_push_back(JoinHandle(handle));
+    }
+
+    // one thread executor
+    pub fn block_on<F: Future>(&self, mut future: F) {
+        let waker = async_task::waker_fn(|| {});
+
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = unsafe { Pin::new_unchecked(&mut future) };
+        let mut main_stop = false;
+        loop {
+            if !main_stop {
+                match Future::poll(future.as_mut(), &mut cx) {
+                    Poll::Ready(_) => {
+                        main_stop = true;
+                    }
+                    Poll::Pending => {
+                        continue;
+                    }
+                };
             }
-        };
-    }
-}
 
-// one thread executor
-pub fn run<F: Future>(mut future: F) -> F::Output {
-    let waker = async_task::waker_fn(|| {});
+            let len = self.runtime.handle_queue.lock().len();
+            if len == 0 {
+                break;
+            }
 
-    let mut cx = Context::from_waker(&waker);
+            if let Some(task) = self.runtime.task_pop_front() {
+                task.run();
+            }
 
-    let mut future = unsafe { Pin::new_unchecked(&mut future) };
-    loop {
-        match Future::poll(future.as_mut(), &mut cx) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {}
-        };
-
-        if let Some(task) = RUNTIME.lock().pop_front() {
-            task.run();
-        } 
+            let mut handle = self.runtime.handle_pop_front().unwrap();
+            let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
+            match Future::poll(check_handle, &mut cx) {
+                Poll::Ready(_) => {
+                    continue;
+                }
+                Poll::Pending => {
+                    self.runtime.handle_push_back(handle);
+                }
+            };
+        }
     }
 }
