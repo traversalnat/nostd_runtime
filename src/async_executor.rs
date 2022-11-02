@@ -56,27 +56,32 @@ impl Executor {
         let mut cx = Context::from_waker(&waker);
 
         let mut future = unsafe { Pin::new_unchecked(&mut future) };
+        let mut main_stopped = false;
         loop {
-            match Future::poll(future.as_mut(), &mut cx) {
-                Poll::Ready(_) => {
-                    break;
-                }
-                Poll::Pending => {
-                    continue;
-                }
-            };
-        }
+            if !main_stopped {
+                match Future::poll(future.as_mut(), &mut cx) {
+                    Poll::Ready(_) => {
+                        main_stopped = true;
+                    }
+                    Poll::Pending => {}
+                };
+            }
 
-        while let Some(mut handle) = self.runtime.task_pop_front() {
-            let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
-            match Future::poll(check_handle, &mut cx) {
-                Poll::Ready(_) => {
-                    continue;
-                }
-                Poll::Pending => {
-                    self.runtime.task_push_back(handle);
-                }
-            };
+            while let Some(mut handle) = self.runtime.task_pop_front() {
+                let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
+                match Future::poll(check_handle, &mut cx) {
+                    Poll::Ready(_) => {
+                        continue;
+                    }
+                    Poll::Pending => {
+                        self.runtime.task_push_back(handle);
+                    }
+                };
+            }
+
+            if main_stopped {
+                break;
+            }
         }
     }
 }
