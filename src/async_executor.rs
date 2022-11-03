@@ -27,6 +27,10 @@ impl Runtime {
     pub fn task_push_back(&self, task: PinBoxFuture) {
         self.task_queue.lock().push_back(task)
     }
+
+    pub fn task_size(&self) -> usize {
+        self.task_queue.lock().len()
+    }
 }
 
 pub struct Executor {
@@ -67,16 +71,18 @@ impl Executor {
                 };
             }
 
-            while let Some(mut handle) = self.runtime.task_pop_front() {
-                let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
-                match Future::poll(check_handle, &mut cx) {
-                    Poll::Ready(_) => {
-                        continue;
-                    }
-                    Poll::Pending => {
-                        self.runtime.task_push_back(handle);
-                    }
-                };
+            for _ in 0..self.runtime.task_size() {
+                if let Some(mut handle) = self.runtime.task_pop_front() {
+                    let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
+                    match Future::poll(check_handle, &mut cx) {
+                        Poll::Ready(_) => {
+                            continue;
+                        }
+                        Poll::Pending => {
+                            self.runtime.task_push_back(handle);
+                        }
+                    };
+                }
             }
 
             if main_stopped {
