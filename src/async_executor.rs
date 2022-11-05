@@ -10,11 +10,12 @@ use spin::Mutex;
 
 pub use futures::join;
 
-type PinBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
+type PinBoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 pub(crate) type Queue = Arc<Mutex<LinkedList<PinBoxFuture>>>;
 
 /// Runtime definition
+#[derive(Clone)]
 pub(crate) struct Runtime {
     pub(crate) task_queue: Queue,
 }
@@ -26,10 +27,6 @@ impl Runtime {
 
     pub fn task_push_back(&self, task: PinBoxFuture) {
         self.task_queue.lock().push_back(task)
-    }
-
-    pub fn task_size(&self) -> usize {
-        self.task_queue.lock().len()
     }
 }
 
@@ -54,40 +51,24 @@ impl Executor {
     }
 
     // one thread executor
-    pub fn block_on<F: Future>(&self, mut future: F) {
+    pub fn block_on<F>(&self, future: F) 
+    where F: Future<Output = ()> + Send + 'static {
         let waker = async_task::waker_fn(|| {});
 
         let mut cx = Context::from_waker(&waker);
 
-        let mut future = unsafe { Pin::new_unchecked(&mut future) };
-        let mut main_stopped = false;
-        loop {
-            if !main_stopped {
-                match Future::poll(future.as_mut(), &mut cx) {
-                    Poll::Ready(_) => {
-                        main_stopped = true;
-                    }
-                    Poll::Pending => {}
-                };
-            }
+        self.spawn(future);
 
-            for _ in 0..self.runtime.task_size() {
-                if let Some(mut handle) = self.runtime.task_pop_front() {
-                    let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
-                    match Future::poll(check_handle, &mut cx) {
-                        Poll::Ready(_) => {
-                            continue;
-                        }
-                        Poll::Pending => {
-                            self.runtime.task_push_back(handle);
-                        }
-                    };
+        while let Some(mut handle) = self.runtime.task_pop_front() {
+            let check_handle = unsafe { Pin::new_unchecked(&mut handle) };
+            match Future::poll(check_handle, &mut cx) {
+                Poll::Ready(_) => {
+                    continue;
                 }
-            }
-
-            if main_stopped {
-                break;
-            }
+                Poll::Pending => {
+                    self.runtime.task_push_back(handle);
+                }
+            };
         }
     }
 }
